@@ -1,0 +1,22 @@
+{
+  "name": "touchline-workspace",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc --noEmit && vite build",
+    "test": "playwright test"
+  },
+  "dependencies": {
+    "dompurify": "^3.2.6",
+    "lucide": "^0.468.0",
+    "marked": "^15.0.12"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.51.1",
+    "prettier": "3.5.3",
+    "typescript": "~5.8.3",
+    "vite": "^6.3.5"
+  }
+}
