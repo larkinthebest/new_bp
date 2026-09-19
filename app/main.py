@@ -16,6 +16,7 @@ from pydantic import ValidationError
 
 from app.ai import AI
 from app.config import Settings
+from app.errors import chat_error_message
 from app.index import Index, Retriever
 from app.ingestion import SUPPORTED, Ingestor
 from app.models import ChatRequest, Metadata, SearchRequest
@@ -38,7 +39,8 @@ def create_app(settings=None):
             app.state.storage, app.state.ai, app.state.index = storage, ai, index
             app.state.retriever = Retriever(settings, ai, index)
             app.state.chat_gate = asyncio.Semaphore(3)
-            worker = asyncio.create_task(Ingestor(settings, ai, index, storage).worker())
+            app.state.ingestor = Ingestor(settings, ai, index, storage)
+            worker = asyncio.create_task(app.state.ingestor.worker())
             try:
                 yield
             finally:
@@ -101,7 +103,7 @@ def create_app(settings=None):
     @app.get("/api/contents")
     async def contents():
         return await app.state.storage.run(
-            "SELECT id,name,metadata,status,progress,error,segments,created_at FROM contents ORDER BY created_at DESC",
+            "SELECT id,name,metadata,status,progress,error,segments,created_at FROM contents ORDER BY created_at DESC,rowid DESC",
             fetch=True,
         )
 
@@ -150,10 +152,22 @@ def create_app(settings=None):
         if row["status"] != "failed":
             raise HTTPException(409, "Only failed jobs can be retried")
         await app.state.storage.run(
-            "UPDATE contents SET status='queued',progress='Queued',error=NULL WHERE id=?",
+            "UPDATE contents SET status='queued',progress='Queued',error=NULL WHERE id=? AND status='failed'",
             (str(content_id),),
         )
         return {"status": "queued"}
+
+    @app.delete("/api/contents/{content_id}", status_code=204)
+    async def delete_content(content_id: UUID):
+        try:
+            removed = await app.state.ingestor.delete_content(str(content_id))
+        except Exception as exc:
+            log.error("content_deletion_failed type=%s", type(exc).__name__)
+            raise HTTPException(
+                503, "Deletion could not finish. Please retry deleting this source."
+            ) from exc
+        if not removed:
+            raise HTTPException(404, "Source not found")
 
     @app.post("/api/contents/{content_id}/reindex")
     async def reindex(content_id: UUID):
@@ -226,12 +240,40 @@ def create_app(settings=None):
         if not settings.chat_configured:
             raise HTTPException(
                 503,
-                "Configure the answer provider in .env: CHAT_PROVIDER, AZURE_OPENAI_API_KEY, AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_DEPLOYMENT",
+                "Configure the answer provider in .env: CHAT_PROVIDER=gemini, GEMINI_API_KEY and GEMINI_MODEL; or select CHAT_PROVIDER=openai with OPENAI_API_KEY",
             )
         if not settings.openai_api_key:
             raise HTTPException(503, "Add OPENAI_API_KEY to .env and restart the server")
         if not body.query.strip():
             raise HTTPException(422, "Enter a question")
+        if body.all_sources and body.content_ids:
+            raise HTTPException(422, "Choose selected sources or all sources, not both")
+        if body.content_ids:
+            for content_id in body.content_ids:
+                source = await app.state.storage.content(content_id)
+                if not source:
+                    raise HTTPException(
+                        404, "A selected source was deleted. Select a source again."
+                    )
+                if source["status"] != "ready":
+                    raise HTTPException(
+                        409,
+                        "The selected source is not ready. Wait for processing or retry the source.",
+                    )
+        elif not body.all_sources:
+            latest = await app.state.storage.run(
+                "SELECT id,status FROM contents ORDER BY created_at DESC,rowid DESC LIMIT 1",
+                fetch=True,
+            )
+            if latest:
+                if latest[0]["status"] != "ready":
+                    raise HTTPException(
+                        409,
+                        "The newest source is not ready. Wait or explicitly select another source.",
+                    )
+                body.content_ids = [latest[0]["id"]]
+            else:
+                raise HTTPException(422, "Upload and select a source before asking a question.")
         chat_id = None
         history = [t.model_dump() for t in body.history]
         if not body.incognito:
@@ -283,9 +325,7 @@ def create_app(settings=None):
                 log.error("chat_failed type=%s", type(exc).__name__)
                 yield event(
                     "error",
-                    {
-                        "message": "The answer could not be completed. Check the OpenAI and Qdrant connections and try again."
-                    },
+                    {"message": chat_error_message(exc, settings.chat_provider)},
                 )
 
         return StreamingResponse(

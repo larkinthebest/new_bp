@@ -1,8 +1,7 @@
 from pathlib import Path
 from typing import Literal
-from urllib.parse import urlparse
 
-from pydantic import Field, field_validator
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -10,46 +9,19 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
     openai_api_key: str = ""
     chat_model: str = "gpt-4.1"
-    chat_provider: Literal["openai", "azure"] = "openai"
-    azure_openai_api_key: str = ""
-    azure_openai_endpoint: str = ""
-    azure_openai_deployment: str = ""
-
-    @field_validator("azure_openai_endpoint")
-    @classmethod
-    def validate_azure_endpoint(cls, value):
-        value = value.strip().rstrip("/")
-        if not value:
-            return value
-        parsed = urlparse(value)
-        if (
-            parsed.scheme != "https"
-            or not parsed.hostname
-            or parsed.hostname == "ai.azure.com"
-            or parsed.username
-            or parsed.password
-            or parsed.query
-            or parsed.fragment
-            or parsed.path not in ("", "/openai/v1")
-        ):
-            raise ValueError(
-                "Use the Azure resource HTTPS endpoint, not the Foundry portal/project URL"
-            )
-        return value
+    chat_provider: Literal["openai", "gemini"] = "openai"
+    gemini_api_key: str = ""
+    gemini_model: str = "gemini-2.5-flash"
 
     @property
     def chat_configured(self) -> bool:
-        if self.chat_provider == "azure":
-            return bool(
-                self.azure_openai_api_key
-                and self.azure_openai_endpoint
-                and self.azure_openai_deployment
-            )
+        if self.chat_provider == "gemini":
+            return bool(self.gemini_api_key.strip() and self.gemini_model.strip())
         return bool(self.openai_api_key)
 
     @property
     def answer_model(self) -> str:
-        return self.azure_openai_deployment if self.chat_provider == "azure" else self.chat_model
+        return self.gemini_model if self.chat_provider == "gemini" else self.chat_model
 
     planner_model: str = "gpt-4.1-mini"
     vision_model: str = "gpt-4.1-mini"

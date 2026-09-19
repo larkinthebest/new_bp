@@ -11,6 +11,9 @@ async def client(settings, monkeypatch):
     app = create_app(settings)
     async with app.router.lifespan_context(app):
         await seed(app.state.index, [make_segment()])
+        await app.state.storage.run(
+            "INSERT INTO contents(id,name,path,metadata,status) VALUES ('one','First.mp4','test.mp4','{}','ready')"
+        )
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://test"
         ) as client:
@@ -89,3 +92,49 @@ async def test_failed_stream_does_not_persist_partial_answer(client, monkeypatch
     assert "event: error" in response.text and "event: done" not in response.text
     chat = (await client.get("/api/chats")).json()[0]
     assert (await client.get("/api/chats/" + chat["id"])).json() == []
+
+
+async def test_gemini_without_key_reports_configuration_error(client, settings):
+    settings.chat_provider = "gemini"
+    settings.gemini_api_key = ""
+    health = (await client.get("/api/health")).json()
+    assert health["chat_provider"] == "gemini"
+    assert health["chat_configured"] is False
+    response = await client.post("/api/chat", json={"query": "Who won?"})
+    assert response.status_code == 503
+    assert "GEMINI_API_KEY" in response.json()["detail"]
+    assert (await client.get("/api/chats")).json() == []
+
+
+async def test_chat_defaults_to_latest_source_and_all_requires_opt_in(client):
+    import json
+
+    app = client._transport.app
+    await seed(app.state.index, [make_segment(content="second")])
+    await app.state.storage.run(
+        "INSERT INTO contents(id,name,path,metadata,status) VALUES ('second','Second.mp4','second.mp4','{}','ready')"
+    )
+    for options, expected in [
+        ({}, {"second"}),
+        ({"content_ids": ["one"]}, {"one"}),
+        ({"all_sources": True}, {"one", "second"}),
+    ]:
+        response = await client.post(
+            "/api/chat", json={"query": "final score", "incognito": True, **options}
+        )
+        assert response.status_code == 200
+        events = response.text.split("\n\n")
+        data = next(
+            event.split("data: ", 1)[1] for event in events if event.startswith("event: sources")
+        )
+        assert {s["segment"]["content_id"] for s in json.loads(data)} == expected
+    assert (
+        await client.post(
+            "/api/chat", json={"query": "score", "content_ids": ["one"], "all_sources": True}
+        )
+    ).status_code == 422
+    assert (
+        await client.post("/api/chat", json={"query": "score", "content_ids": ["deleted"]})
+    ).status_code == 404
+    await app.state.storage.run("UPDATE contents SET status='running' WHERE id='second'")
+    assert (await client.post("/api/chat", json={"query": "score"})).status_code == 409

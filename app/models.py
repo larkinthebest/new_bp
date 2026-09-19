@@ -160,6 +160,7 @@ class Turn(BaseModel):
 
 
 class ChatRequest(SearchRequest):
+    all_sources: bool = False
     chat_id: str | None = None
     incognito: bool = False
     history: list[Turn] = Field(default_factory=list, max_length=12)

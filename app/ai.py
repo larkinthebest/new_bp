@@ -59,14 +59,12 @@ class AI:
             api_key=settings.openai_api_key or "not-configured", timeout=90, max_retries=2
         )
         self.answer_client = self.client
-        if settings.chat_provider == "azure":
+        if settings.chat_provider == "gemini":
             self.answer_client = None
             if settings.chat_configured:
-                endpoint = settings.azure_openai_endpoint
-                base_url = endpoint if endpoint.endswith("/openai/v1") else endpoint + "/openai/v1"
                 self.answer_client = AsyncOpenAI(
-                    api_key=settings.azure_openai_api_key,
-                    base_url=base_url + "/",
+                    api_key=settings.gemini_api_key,
+                    base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
                     timeout=90,
                     max_retries=2,
                 )
@@ -357,9 +355,7 @@ class AI:
                 goals[key] = {"confirmed_score_transition": transition, "evidence": selected}
             schema = create_model("AnchoredGoals", **{key: (GoalExplanation, ...) for key in goals})
             async with self.gate:
-                response = await self.answer_client.responses.parse(
-                    model=self.settings.answer_model,
-                    store=False,
+                parsed = await self.parse_answer(
                     text_format=schema,
                     max_output_tokens=3500,
                     instructions=(
@@ -392,8 +388,6 @@ class AI:
                         ensure_ascii=False,
                     ),
                 )
-            if response.status != "completed" or response.output_parsed is None:
-                raise ValueError("Incomplete anchored goal analysis")
             final = game["final"]
             label = "Итоговый счёт" if russian else "Final score"
             title = f"{game['team_a']} – {game['team_b']}"
@@ -411,7 +405,7 @@ class AI:
                 )
             for i, transition in enumerate(transitions, 1):
                 key = f"goal_{i}"
-                explanation = getattr(response.output_parsed, key)
+                explanation = getattr(parsed, key)
                 if not set(explanation.citations).issubset(allowed[key]):
                     raise ValueError("Goal explanation references an unknown citation")
                 score = "–".join(map(str, transition["after"]["score"]))
@@ -443,12 +437,13 @@ class AI:
     async def answer(self, query, history, evidence, coverage=None):
         if not self.settings.chat_configured:
             raise ValueError(
-                "Answer provider is not configured: check CHAT_PROVIDER and Azure settings"
+                "Answer provider is not configured: check CHAT_PROVIDER and GEMINI_API_KEY"
             )
         if (
             coverage
             and coverage.mode == "whole_match"
             and re.search(r"goal|score|winner|won|гол|сч[её]т|побед", query, re.I)
+            and not re.search(r"jersey|shirt|number|номер", query, re.I)
         ):
             games = score_anchors(evidence)
             if games:
@@ -475,6 +470,22 @@ class AI:
             content = self.clip(turn["content"], min(1000, remaining))
             remaining -= len(self.encoding.encode(content))
             compact_history.insert(0, {"role": turn["role"], "content": content})
+        payload = json.dumps(
+            {
+                "question": query,
+                "conversation": compact_history,
+                "coverage": coverage.model_dump()
+                if coverage
+                else {"complete": False, "mode": "local"},
+                "evidence_representation": representation,
+                "evidence": prompt_evidence,
+            },
+            ensure_ascii=False,
+        )
+        if self.settings.chat_provider == "gemini":
+            async for text in self.stream_gemini(payload):
+                yield text
+            return
         async with self.gate:
             stream = await self.answer_client.responses.create(
                 model=self.settings.answer_model,
@@ -482,18 +493,7 @@ class AI:
                 stream=True,
                 instructions=ANALYST,
                 max_output_tokens=4000,
-                input=json.dumps(
-                    {
-                        "question": query,
-                        "conversation": compact_history,
-                        "coverage": coverage.model_dump()
-                        if coverage
-                        else {"complete": False, "mode": "local"},
-                        "evidence_representation": representation,
-                        "evidence": prompt_evidence,
-                    },
-                    ensure_ascii=False,
-                ),
+                input=payload,
             )
             completed = False
             try:
@@ -506,6 +506,73 @@ class AI:
                         raise ValueError("Генерация ответа не завершена")
                 if not completed:
                     raise ValueError("Поток ответа прерван")
+            finally:
+                await stream.close()
+
+    async def parse_answer(self, *, text_format, instructions, input, max_output_tokens):
+        if not self.settings.chat_configured:
+            raise ValueError("Answer provider is not configured")
+        if self.settings.chat_provider == "gemini":
+            response = await self.answer_client.beta.chat.completions.parse(
+                model=self.settings.answer_model,
+                messages=[
+                    {"role": "system", "content": instructions},
+                    {"role": "user", "content": input},
+                ],
+                response_format=text_format,
+                # Gemini's cap includes reasoning as well as the final JSON.
+                max_tokens=max_output_tokens + 8192,
+            )
+            if not response.choices:
+                raise ValueError("Gemini returned no structured answer")
+            choice = response.choices[0]
+            if (
+                choice.finish_reason != "stop"
+                or choice.message.refusal
+                or choice.message.parsed is None
+            ):
+                raise ValueError("Incomplete or refused Gemini goal analysis")
+            return choice.message.parsed
+        response = await self.answer_client.responses.parse(
+            model=self.settings.answer_model,
+            store=False,
+            text_format=text_format,
+            instructions=instructions,
+            input=input,
+            max_output_tokens=max_output_tokens,
+        )
+        if response.status != "completed" or response.output_parsed is None:
+            raise ValueError("Incomplete anchored goal analysis")
+        return response.output_parsed
+
+    async def stream_gemini(self, payload):
+        async with self.gate:
+            stream = await self.answer_client.chat.completions.create(
+                model=self.settings.answer_model,
+                messages=[
+                    {"role": "system", "content": ANALYST},
+                    {"role": "user", "content": payload},
+                ],
+                stream=True,
+                max_tokens=12288,
+            )
+            completed, has_text = False, False
+            try:
+                async for event in stream:
+                    if not event.choices:
+                        continue
+                    choice = event.choices[0]
+                    if choice.delta.refusal:
+                        raise ValueError("Gemini refused the answer")
+                    if choice.delta.content:
+                        has_text = True
+                        yield choice.delta.content
+                    if choice.finish_reason:
+                        if choice.finish_reason != "stop":
+                            raise ValueError("Gemini answer was not completed")
+                        completed = True
+                if not completed or not has_text:
+                    raise ValueError("Gemini answer stream was interrupted or empty")
             finally:
                 await stream.close()
 

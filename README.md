@@ -30,6 +30,8 @@ Compose поднимает Qdrant отдельно, хранит данные в
 
 ## Работа
 
+В библиотеке кнопка **Delete** удаляет выбранный исходный файл, его сегменты из Qdrant, кэш анализа и запись SQLite. Обработка этого файла отменяется; копии его доказательств убираются из истории, тексты прежних ответов сохраняются. Удаление требует подтверждения имени файла. При сбое повторите удаление; после перезапуска незавершённая очистка возобновляется. API: `DELETE /api/contents/{content_id}`.
+
 1. Добавьте материал. Поддерживаются TXT, MD, PDF с текстовым слоем, DOCX, HTML, CSV, JSON, SRT/VTT как документы; MP4/MOV/MKV/WebM; MP3/WAV/M4A/OGG/FLAC/AAC.
 2. Укажите идентификатор матча, команды и при необходимости тайм, игроков, смещение часов матча. Через API доступны также сезон и ссылка на источник. Имена и транслитерации можно внести вместе: `Mbappé, Мбаппе`.
 3. Дождитесь статуса «Готово». Очередь сохраняется в SQLite. После сбоя можно нажать «Повторить»; после перезапуска незавершенное задание запускается заново.
@@ -117,12 +119,18 @@ tests/             детерминированные backend/integration checks
 API и параметры сверены с официальными источниками: [OpenAI Structured Outputs](https://developers.openai.com/api/docs/guides/structured-outputs), [embeddings](https://developers.openai.com/api/docs/guides/embeddings), [speech-to-text](https://developers.openai.com/api/docs/guides/speech-to-text), [vision](https://developers.openai.com/api/docs/guides/images-vision), [Qdrant client](https://github.com/qdrant/qdrant-client), [RAGAS](https://docs.ragas.io/en/stable/). Точные зависимости закреплены в `uv.lock` и `frontend/package-lock.json`.
 
 
-### Azure OpenAI для ответов
+### Gemini для ответов
 
-В `.env` укажите `CHAT_PROVIDER=azure`, `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT` и `AZURE_OPENAI_DEPLOYMENT`. Endpoint — адрес ресурса вида `https://RESOURCE.openai.azure.com` или `https://RESOURCE.services.ai.azure.com`, также принимается полный путь `/openai/v1/`. Ссылка на портал `ai.azure.com/nextgen/...` не является API endpoint. Deployment — имя вашего развёртывания, а не произвольное название модели. Развёртывание должно поддерживать Responses API и structured outputs.
+В `.env` задайте `CHAT_PROVIDER=gemini`, `GEMINI_API_KEY` и `GEMINI_MODEL=gemini-2.5-flash`. Ключ создаётся в [Google AI Studio](https://aistudio.google.com/apikey). После изменения `.env` перезапустите сервер. Endpoint Google уже задан в коде; отдельный адрес ресурса или deployment не нужен.
 
-Azure используется для финальных ответов и структурированного объяснения голов. `OPENAI_API_KEY` остаётся нужен для embeddings, Whisper, анализа кадров, планирования, reranking и промежуточных сводок. Переиндексировать видео при смене провайдера ответов не требуется. При неполной настройке Azure скрытого переключения на OpenAI нет. После заполнения полей перезапустите сервер. Для возврата установите `CHAT_PROVIDER=openai`.
+Gemini формирует финальные ответы и структурированные объяснения голов. Потоковые ответы и JSON-схемы передаются через [официальный OpenAI-совместимый API Gemini](https://ai.google.dev/gemini-api/docs/openai). Модель можно заменить через `GEMINI_MODEL`; [список моделей Google](https://ai.google.dev/gemini-api/docs/models).
 
-Официальная документация: https://learn.microsoft.com/en-us/azure/foundry/openai/api-version-lifecycle
-#   n e w _ b p  
- 
+`OPENAI_API_KEY` остаётся нужен для embeddings, Whisper, анализа кадров, планирования, reranking и промежуточных сводок. Индекс и загруженные материалы не меняются; переиндексация не требуется. Без ключа Gemini приложение показывает ошибку настройки и не переключается на OpenAI автоматически. Для явного выбора OpenAI используйте `CHAT_PROVIDER=openai` и `CHAT_MODEL`.
+
+Ключи и настройки прежнего провайдера удалены из локальной конфигурации. Это не отзыв ключей в облачном аккаунте.
+
+# new_bp
+
+### Выбор источников
+
+Новая загрузка автоматически становится выбранным источником. Выбор сохраняется в браузере; имя файла видно над полем вопроса. Флажками Library можно явно выбрать несколько файлов. Кнопка Use all sources включает анализ всей библиотеки. Пустой выбор в интерфейсе не запускает анализ; в API запрос без content_ids по умолчанию выбирает последний загруженный источник. Для всей библиотеки API требует all_sources=true. Если выбранный или последний файл ещё обрабатывается, сервер не подменяет его другими видео.

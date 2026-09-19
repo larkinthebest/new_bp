@@ -2,9 +2,9 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
-from openai import AuthenticationError, RateLimitError
+from openai import APITimeoutError, AuthenticationError, InternalServerError, RateLimitError
 
-from app.errors import IngestionError, ingestion_error_message
+from app.errors import IngestionError, chat_error_message, ingestion_error_message
 from app.ingestion import Ingestor
 from tests.conftest import FakeAI
 
@@ -32,6 +32,20 @@ def test_quota_failure_is_distinguished_from_rate_limit():
         "private details", response=response(429), body={"code": "insufficient_quota"}
     )
     assert "billing" in ingestion_error_message(error)
+
+
+def test_chat_errors_identify_provider_without_leaking_response():
+    request = httpx.Request(
+        "POST", "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+    )
+    error = InternalServerError("secret", response=httpx.Response(503, request=request), body=None)
+    message = chat_error_message(error, "gemini")
+    assert "Gemini" in message and "503" in message and "secret" not in message
+    assert "did not respond in time" in chat_error_message(
+        APITimeoutError(request=request), "gemini"
+    )
+    error = AuthenticationError("secret", response=response(401), body=None)
+    assert "OpenAI" in chat_error_message(error, "gemini")
 
 
 async def test_missing_media_tools_fail_before_index_changes(settings, monkeypatch):

@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
@@ -158,6 +159,34 @@ class Ingestor:
     def __init__(self, settings, ai, index, storage):
         self.settings, self.ai, self.index, self.storage = settings, ai, index, storage
         self.media_gate = asyncio.Semaphore(3)
+        self.queue_lock = asyncio.Lock()
+        self.active_id = None
+        self.active_task = None
+
+    async def delete_content(self, content_id):
+        """Stop ingestion before removing vectors, files, checkpoints and SQL data."""
+        async with self.queue_lock:
+            content = await self.storage.content(content_id)
+            if not content:
+                return False
+            uploads = (self.settings.data_dir / "uploads").resolve()
+            path = Path(content["path"]).resolve()
+            checkpoints = (self.settings.data_dir / "checkpoints").resolve()
+            cache = (checkpoints / content_id).resolve()
+            # Validate the resolved targets before any filesystem removal.
+            if path.parent != uploads or cache.parent != checkpoints:
+                raise ValueError("Source path is outside the upload directory")
+            await self.storage.mark_deleting(content_id)
+            if self.active_id == content_id and self.active_task:
+                self.active_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await self.active_task
+            await self.index.delete(content_id)
+            await asyncio.to_thread(path.unlink, missing_ok=True)
+            if cache.exists():
+                await asyncio.to_thread(shutil.rmtree, cache)
+            await self.storage.delete_content(content_id)
+            return True
 
     async def progress(self, content_id, message):
         await self.storage.run("UPDATE contents SET progress=? WHERE id=?", (message, content_id))
@@ -388,32 +417,49 @@ class Ingestor:
         return segments
 
     async def worker(self):
+        # A crash during deletion must never put the source back in the queue.
+        pending = await self.storage.run(
+            "SELECT id FROM contents WHERE status='deleting'", fetch=True
+        )
+        for row in pending:
+            try:
+                await self.delete_content(row["id"])
+            except Exception as exc:
+                log.error("deletion_recovery_failed type=%s", type(exc).__name__)
         while True:
-            rows = await self.storage.run(
-                "SELECT * FROM contents WHERE status='queued' ORDER BY created_at LIMIT 1",
-                fetch=True,
-            )
+            async with self.queue_lock:
+                rows = await self.storage.run(
+                    "SELECT * FROM contents WHERE status='queued' ORDER BY created_at LIMIT 1",
+                    fetch=True,
+                )
+                if rows:
+                    content = rows[0]
+                    await self.storage.run(
+                        "UPDATE contents SET status='running',error=NULL WHERE id=?",
+                        (content["id"],),
+                    )
+                    self.active_id = content["id"]
+                    task = self.active_task = asyncio.create_task(self.process(content))
             if not rows:
                 await asyncio.sleep(1)
                 continue
-            content = rows[0]
-            await self.storage.run(
-                "UPDATE contents SET status='running',error=NULL WHERE id=?", (content["id"],)
-            )
             try:
                 async with asyncio.timeout(6 * 3600):
-                    await self.process(content)
+                    await task
             except asyncio.CancelledError:
-                raise
+                if asyncio.current_task().cancelling():
+                    raise
             except Exception as exc:
                 # No input, secrets or upstream response bodies in logs.
                 log.error(
                     "ingestion_failed content_id=%s type=%s", content["id"], type(exc).__name__
                 )
                 await self.storage.run(
-                    "UPDATE contents SET status='failed',progress='Processing failed',error=? WHERE id=?",
+                    "UPDATE contents SET status='failed',progress='Processing failed',error=? WHERE id=? AND status='running'",
                     (
                         ingestion_error_message(exc),
                         content["id"],
                     ),
                 )
+            finally:
+                self.active_id = self.active_task = None

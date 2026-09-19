@@ -66,6 +66,19 @@ async def test_global_question_includes_ending_and_respects_selected_source(sett
     assert [e.citation for e in evidence] == list(range(1, 25))
 
 
+async def test_two_videos_do_not_mix_116_and_105_segments(settings, index):
+    await seed(
+        index,
+        [make_segment(content="first", i=i, start=i * 6) for i in range(116)]
+        + [make_segment(content="second", i=i, start=i * 6) for i in range(105)],
+    )
+    items, coverage = await Retriever(settings, FakeAI(), index).prepare(
+        SearchRequest(query="final score", content_ids=["second"])
+    )
+    assert coverage.complete and coverage.scanned_segments == coverage.included_segments == 105
+    assert {item.segment.content_id for item in items} == {"second"}
+
+
 async def test_budget_exhaustion_preserves_ending_and_reports_partial(settings, index):
     settings.timeline_context_tokens = 4000
     await seed(index, [make_segment(i=i, start=i * 12, text="Evidence " * 30) for i in range(24)])

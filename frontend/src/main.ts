@@ -86,8 +86,12 @@ const state = {
   sources: [] as Source[],
   contents: [] as Content[],
   selected: new Set<string>(),
+  allSources: false,
+  scopeInitialized: false,
   controller: null as AbortController | null,
   view: "chat",
+  pendingDelete: null as Content | null,
+  deleted: new Set<string>(),
 };
 const $ = <T extends HTMLElement = HTMLElement>(selector: string) =>
   document.querySelector<T>(selector)!;
@@ -151,45 +155,46 @@ const clock = (seconds: number | null) =>
 $("#app").innerHTML = `
 <aside class="sidebar" id="sidebar">
   <a class="brand" href="/" aria-label="Touchline, home"><span class="brand-mark">${icon("scan-line")}</span>touchline<span class="brand-dot">.</span></a>
-  <div class="workspace-label">THE ANALYST WORKSPACE</div>
+  <div class="workspace-label">Your match. Every detail.</div>
   <button class="new-chat" id="new-chat">${icon("plus")} New analysis <span>↗</span></button>
-  <nav><button class="nav-item active" id="chat-view">${icon("messages-square")} Chats</button>
+  <nav aria-label="Workspace"><button class="nav-item active" id="chat-view" aria-current="page">${icon("messages-square")} Chats</button>
   <button class="nav-item" id="library-view">${icon("folder-open")} Library <span id="content-count">0</span></button></nav>
-  <div class="sidebar-heading">RECENT ANALYSES</div><div id="history" class="history"><p class="empty-small">Your conversations will appear here</p></div>
+  <div class="sidebar-heading">Recent analyses</div><div id="history" class="history"><p class="empty-small">Your conversations will appear here</p></div>
   <div class="sidebar-bottom"><div class="workspace-badge">${icon("radar")}<div>Your workspace<small>Sources and history on this server</small></div></div>
   <button class="quiet-button" id="access-button">${icon("key-round")} Access token</button></div>
 </aside>
+<button class="nav-scrim" id="nav-scrim" aria-label="Close navigation" tabindex="-1"></button>
 <main class="main">
- <header class="topbar"><div class="topbar-title"><button class="icon-button mobile-menu" id="menu" aria-label="Open menu">${icon("menu")}</button><span>Analysis studio</span><span class="slash">/</span><strong id="view-title">New analysis</strong></div>
+ <header class="topbar"><div class="topbar-title"><button class="icon-button mobile-menu" id="menu" aria-label="Open menu" aria-controls="sidebar" aria-expanded="false">${icon("menu")}</button><span>Match room</span><span class="slash">/</span><strong id="view-title">New analysis</strong></div>
  <div class="topbar-actions"><button id="theme-toggle" class="theme-button" type="button" aria-label="Switch to dark theme"></button><button id="incognito" class="incognito" aria-pressed="false">${icon("venetian-mask")}<span>Incognito</span><span class="toggle"></span></button></div></header>
  <div class="workspace-body"><section class="chat-pane">
   <div id="config-note" class="config-note" hidden></div>
-  <div id="conversation" class="conversation">
-   <div class="welcome" id="welcome"><div class="eyebrow"><span></span> WATCH CLOSER. UNDERSTAND MORE.</div>
+  <div id="conversation" class="conversation is-empty">
+   <div class="welcome" id="welcome"><div class="eyebrow">The analyst’s view</div>
    <h1>See the moment.<br>Understand <em>the game.</em></h1>
-   <p class="intro">Bring your footage, interviews and match notes together.<br class="desktop-br"> Ask a better question. Find the evidence behind the answer.</p>
+   <p class="intro">From the opening play to the final whistle.<br class="desktop-br"> Explore your footage, interviews and match notes in one place.</p>
    <div class="prompt-list" aria-label="Suggested questions">
     <button data-query="Find the turning points in this match and explain what changed.">What changed the game?</button>
     <button data-query="Analyze how the team creates and uses space, with evidence from the match.">How did the team create space?</button>
     <button data-query="Compare the match footage with the post-match analysis. Where do they agree or differ?">Does the footage tell the same story?</button>
    </div></div><div id="messages" class="messages"></div>
   </div>
-  <section id="library" class="library" hidden><div class="library-title"><div class="eyebrow">YOUR KNOWLEDGE BASE</div><h1>Library</h1><p>Choose the sources for your next analysis.</p></div><div id="library-list"></div></section>
-  <div class="composer-area"><div id="scope" class="scope">${icon("layers")} All ready sources</div>
-   <form id="composer" class="composer"><label class="sr-only" for="query">Ask the analyst</label><textarea id="query" placeholder="What would you like to explore?" rows="1" maxlength="2000"></textarea>
-   <div class="composer-controls"><button type="button" id="upload" class="attach">${icon("paperclip")}<span>Add a source</span></button><span class="composer-hint">Video, audio, documents</span><button id="send" class="send" aria-label="Send question">${icon("arrow-up")}</button></div></form>
+  <section id="library" class="library" hidden><div class="library-title"><div class="eyebrow">Your source material</div><h1>Library</h1><p>Choose the sources for your next analysis.</p></div><div id="library-list"></div></section>
+  <div class="composer-area"><div class="scope-row"><div id="scope" class="scope">${icon("layers")} Select a source</div><span id="scope-name" class="scope-name"></span><button type="button" id="all-sources" class="quiet-button" aria-pressed="false">Use all sources</button></div>
+   <form id="composer" class="composer"><button type="button" id="upload" class="attach" aria-label="Add a source" title="Add video, audio or documents">${icon("plus")}</button><label class="sr-only" for="query">Ask the analyst</label><textarea id="query" placeholder="Ask Touchline" rows="1" maxlength="2000"></textarea><button id="send" class="send" aria-label="Send question">${icon("arrow-up")}</button></form>
    <p id="privacy-note" class="privacy-note">Answers use your sources. Always review the analyst’s conclusions.</p></div>
  </section>
  <aside class="evidence-pane"><div class="evidence-heading"><div>${icon("panel-right")}<strong>Analysis context</strong></div><span id="source-count">0</span></div>
  <div id="evidence"><div class="evidence-empty"><div class="evidence-symbol">${icon("scan-eye")}</div><h3>The evidence behind the game</h3><p>Clips and documents supporting<br>your answer will appear here.</p><div class="evidence-steps"><span>${icon("video")} The moment on video</span><span>${icon("text-search")} Related sources</span><span>${icon("history")} Before and after the event</span></div></div></div>
  <div class="evidence-footer">${icon("quote")} Evidence first. Conclusions second.</div></aside></div>
 </main>
-<dialog id="upload-modal"><form id="upload-form"><div class="dialog-heading"><h2>Add a source</h2><button type="button" class="icon-button" data-close aria-label="Close">${icon("x")}</button></div>
+<dialog id="upload-modal" aria-labelledby="upload-title"><form id="upload-form"><div class="dialog-heading"><h2 id="upload-title">Add a source</h2><button type="button" class="icon-button" data-close aria-label="Close">${icon("x")}</button></div>
  <p>Upload match footage, an interview or a document.<br>Processing continues in the background.</p>
  <label class="dropzone">${icon("upload-cloud")}<strong>Choose a file</strong><span>MP4, MP3, PDF, DOCX, TXT and more · up to 1 GB</span><input type="file" id="file" required></label>
  <div class="form-grid"><label>Match / identifier<input id="match" placeholder="For example, madrid-barcelona-2026"></label><label>Teams, comma-separated<input id="teams" placeholder="Real Madrid, Barcelona"></label><label>Competition<input id="competition" placeholder="La Liga"></label><label>Half<input id="half" placeholder="Second half"></label><label>Players, comma-separated<input id="players" placeholder="Mbappé, Mbappe"></label><label>Match clock offset, seconds<input id="offset" type="number" placeholder="Leave blank if unknown"></label></div>
  <p class="small-note">Incognito keeps your conversation out of history. Uploaded sources still join the shared library.</p><div id="upload-error" role="alert"></div><button class="primary" id="upload-submit">Upload and process ${icon("arrow-right")}</button></form></dialog>
-<dialog id="access-modal"><form id="access-form"><div class="dialog-heading"><h2>Workspace access</h2><button type="button" class="icon-button" data-close aria-label="Close">${icon("x")}</button></div><p>Enter the APP_TOKEN set by the server owner.</p><label>Token<input id="token" type="password" required autocomplete="current-password"></label><p id="access-error" role="alert"></p><button class="primary">Sign in</button></form></dialog>
+<dialog id="access-modal" aria-labelledby="access-title"><form id="access-form"><div class="dialog-heading"><h2 id="access-title">Workspace access</h2><button type="button" class="icon-button" data-close aria-label="Close">${icon("x")}</button></div><p>Enter the access token provided by the workspace owner.</p><label>Token<input id="token" type="password" required autocomplete="current-password"></label><p id="access-error" role="alert"></p><button class="primary">Sign in</button></form></dialog>
+<dialog id="delete-source-modal" aria-labelledby="delete-source-title"><form id="delete-source-form"><div class="dialog-heading"><h2 id="delete-source-title">Delete source?</h2><button type="button" class="icon-button" data-close aria-label="Close">${icon("x")}</button></div><p id="delete-source-name" class="delete-source-name"></p><p>The uploaded file, analyzed segments, search index and cached data will be permanently removed. Saved answers remain, but their copies of this source’s evidence will be removed.</p><div id="delete-source-error" role="alert"></div><div class="dialog-actions"><button type="button" class="quiet-button" data-close>Cancel</button><button class="primary danger-button" id="delete-source-submit">Delete permanently</button></div></form></dialog>
 <div id="toast" class="toast" role="status" hidden></div>`;
 
 function toast(text: string) {
@@ -224,10 +229,15 @@ function showView(view: string) {
       : state.chatId
         ? "Match analysis"
         : "New analysis";
-  $("#sidebar").classList.remove("mobile-open");
+  for (const [id, active] of [["#chat-view", view === "chat"], ["#library-view", view === "library"]] as const) {
+    if (active) $(id).setAttribute("aria-current", "page");
+    else $(id).removeAttribute("aria-current");
+  }
+  setMenuOpen(false);
 }
 function renderMessages() {
   $("#welcome").hidden = state.messages.length > 0;
+  $("#conversation").classList.toggle("is-empty", state.messages.length === 0);
   $("#messages").innerHTML = state.messages
     .map(
       (m, i) =>
@@ -272,6 +282,7 @@ function markdown(text: string) {
   });
 }
 function renderSources(sources: Source[]) {
+  sources = sources.filter(s => !state.deleted.has(s.segment.content_id));
   state.sources = sources;
   $("#source-count").textContent = String(sources.length);
   $(".evidence-pane").classList.toggle("has-sources", sources.length > 0);
@@ -296,6 +307,7 @@ function renderSources(sources: Source[]) {
     );
 }
 async function openSource(source: Source) {
+  if (state.deleted.has(source.segment.content_id)) return;
   const s = source.segment;
   $(".evidence-pane").classList.add("has-sources");
   const url = `/api/contents/${encodeURIComponent(s.content_id)}/file`;
@@ -404,12 +416,22 @@ async function loadHistory() {
 }
 async function loadContents() {
   state.contents = await (await api("/contents")).json();
+  if (!state.scopeInitialized) {
+    let saved: {ids?: string[]; all?: boolean} = {};
+    try { saved = JSON.parse(localStorage.getItem("touchline-sources") || "{}") || {}; } catch { /* Use latest upload. */ }
+    state.allSources = saved.all === true;
+    const ids = Array.isArray(saved.ids) ? saved.ids.filter(id => state.contents.some(c => c.id === id)) : [];
+    state.selected = new Set(state.allSources ? [] : ids.length ? ids : state.contents.slice(0, 1).map(c => c.id));
+    state.scopeInitialized = true;
+  }
+  state.selected = new Set([...state.selected].filter(id => state.contents.some(c => c.id === id)));
+  updateScope();
   $("#content-count").textContent = String(state.contents.length);
   $("#library-list").innerHTML = state.contents.length
     ? state.contents
         .map(
           (c) =>
-            `<article class="material"><input type="checkbox" aria-label="Select ${esc(c.name)}" data-select="${c.id}" ${state.selected.has(c.id) ? "checked" : ""} ${c.status !== "ready" ? "disabled" : ""}>${icon("file-stack")}<div><h3>${esc(c.name)}</h3><p>${esc(c.progress)}${c.status === "ready" ? ` · ${c.segments} segments` : ""}</p>${c.error ? `<p class="error-text">${esc(c.error)}</p>` : ""}</div><span class="status ${c.status}">${({ ready: "Ready", queued: "Queued", running: "Processing", failed: "Error" } as Record<string, string>)[c.status]}</span>${c.status === "failed" ? `<button class="quiet-button" data-retry="${c.id}">Retry</button>` : c.status === "ready" ? `<button class="quiet-button" data-reindex="${c.id}" title="Reprocess with the current video analysis settings">Reanalyze</button>` : ""}</article>`,
+            `<article class="material"><input type="checkbox" aria-label="Select ${esc(c.name)}" data-select="${c.id}" ${state.selected.has(c.id) ? "checked" : ""} ${c.status !== "ready" ? "disabled" : ""}>${icon("file-stack")}<div><h3>${esc(c.name)}</h3><p>${esc(c.progress)}${c.status === "ready" ? ` · ${c.segments} segments` : ""}</p>${c.error ? `<p class="error-text">${esc(c.error)}</p>` : ""}</div><span class="status ${c.status}">${({ ready: "Ready", queued: "Queued", running: "Processing", failed: "Error", deleting: "Deletion pending" } as Record<string, string>)[c.status]}</span>${c.status === "failed" ? `<button class="quiet-button" data-retry="${c.id}">Retry</button>` : c.status === "ready" ? `<button class="quiet-button" data-reindex="${c.id}" title="Reprocess with the current video analysis settings">Reanalyze</button>` : ""}<button class="quiet-button delete-source" data-delete-source="${esc(c.id)}" aria-label="Delete ${esc(c.name)}">${icon("trash-2")}<span>Delete</span></button></article>`,
         )
         .join("")
     : '<div class="library-empty">' +
@@ -420,9 +442,14 @@ async function loadContents() {
     .forEach(
       (el) =>
         (el.onchange = () => {
+          if (state.busy) { el.checked = state.selected.has(el.dataset.select!); return; }
+          state.allSources = false;
           el.checked
             ? state.selected.add(el.dataset.select!)
             : state.selected.delete(el.dataset.select!);
+          saveScope();
+          newChat();
+          showView("library");
           updateScope();
         }),
     );
@@ -441,20 +468,48 @@ async function loadContents() {
           }
         }),
     );
+  $("#library-list").querySelectorAll<HTMLButtonElement>("[data-delete-source]").forEach(button => {
+    button.onclick = () => {
+      state.pendingDelete = state.contents.find(c => c.id === button.dataset.deleteSource) || null;
+      if (!state.pendingDelete) return;
+      $("#delete-source-name").textContent = state.pendingDelete.name;
+      $("#delete-source-error").textContent = "";
+      $<HTMLDialogElement>("#delete-source-modal").showModal();
+    };
+  });
   if (document.querySelector("#library-upload"))
     $("#library-upload").onclick = () =>
       $<HTMLDialogElement>("#upload-modal").showModal();
   refreshIcons();
 }
+function saveScope() {
+  try { localStorage.setItem("touchline-sources", JSON.stringify({ids:[...state.selected], all:state.allSources})); } catch { /* Session-only selection. */ }
+}
 function updateScope() {
-  $("#scope").innerHTML =
-    `${icon("layers")} ${state.selected.size ? `Selected sources: ${state.selected.size}` : "All ready sources"}`;
+  $("#scope").innerHTML = `${icon("layers")} ${state.allSources ? "All ready sources" : state.selected.size ? `Selected sources: ${state.selected.size}` : "Select a source"}`;
+  const selected = state.contents.filter(c => state.selected.has(c.id));
+  const names = selected.map(c => `${c.name}${c.status !== "ready" ? " (not ready)" : ""}`).join(", ");
+  $("#scope-name").textContent = names;
+  $("#scope-name").title = names;
+  $("#all-sources").setAttribute("aria-pressed", String(state.allSources));
+  $("#all-sources").textContent = state.allSources ? "Choose sources" : "Use all sources";
   refreshIcons();
 }
+$("#all-sources").onclick = () => {
+  if (state.busy) return;
+  state.allSources = !state.allSources;
+  state.selected.clear();
+  saveScope();
+  newChat();
+  if (!state.allSources) showView("library");
+  updateScope();
+  void loadContents().catch(e => toast(e.message));
+};
 function updatePrivacy() {
   $("#incognito").setAttribute("aria-pressed", String(state.incognito));
+  $(".chat-pane").classList.toggle("incognito-mode", state.incognito);
   $("#privacy-note").textContent = state.incognito
-    ? "Incognito: this conversation is not saved on the app server. Data is sent to OpenAI for processing."
+    ? "Incognito is on. This chat stays out of history. Sources stay in your library; content is sent to the AI provider."
     : "Answers use your sources. Always review the analyst’s conclusions.";
 }
 function newChat() {
@@ -469,7 +524,20 @@ function newChat() {
 $("#new-chat").onclick = newChat;
 $("#chat-view").onclick = () => showView("chat");
 $("#library-view").onclick = () => showView("library");
-$("#menu").onclick = () => $("#sidebar").classList.toggle("mobile-open");
+function setMenuOpen(open: boolean) {
+  $("#sidebar").classList.toggle("mobile-open", open);
+  $("#menu").setAttribute("aria-expanded", String(open));
+  $("#menu").setAttribute("aria-label", open ? "Close menu" : "Open menu");
+  if (open) $("#new-chat").focus();
+}
+$("#menu").onclick = () => setMenuOpen(!$("#sidebar").classList.contains("mobile-open"));
+$("#nav-scrim").onclick = () => setMenuOpen(false);
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && $("#sidebar").classList.contains("mobile-open")) {
+    setMenuOpen(false);
+    $("#menu").focus();
+  }
+});
 $("#incognito").onclick = () => {
   if (state.busy) return;
   state.incognito = !state.incognito;
@@ -482,10 +550,49 @@ $("#access-button").onclick = () =>
 document
   .querySelectorAll<HTMLButtonElement>("[data-close]")
   .forEach((b) => (b.onclick = () => b.closest("dialog")!.close()));
+$("#delete-source-form").addEventListener("submit", async event => {
+  event.preventDefault();
+  const content = state.pendingDelete;
+  if (!content) return;
+  const button = $<HTMLButtonElement>("#delete-source-submit");
+  button.disabled = true;
+  button.textContent = "Deleting…";
+  try {
+    await api(`/contents/${encodeURIComponent(content.id)}`, {method: "DELETE"});
+    state.deleted.add(content.id);
+    state.selected.delete(content.id);
+    saveScope();
+    for (const message of state.messages) {
+      if (message.sources?.some(s => s.segment.content_id === content.id)) {
+        message.sources = message.sources.filter(s => s.segment.content_id !== content.id);
+        message.coverage = undefined;
+      }
+    }
+    renderMessages();
+    renderSources(state.sources.filter(s => s.segment.content_id !== content.id));
+    updateScope();
+    $<HTMLDialogElement>("#delete-source-modal").close();
+    state.pendingDelete = null;
+    await loadContents();
+    toast("Source, indexed segments and cached files deleted.");
+  } catch (error) {
+    $("#delete-source-error").textContent = (error as Error).message;
+  } finally {
+    button.disabled = false;
+    button.textContent = "Delete permanently";
+  }
+});
+function resizeQuery() {
+  const input = $<HTMLTextAreaElement>("#query");
+  input.style.height = "24px";
+  input.style.height = `${Math.min(input.scrollHeight, 144)}px`;
+}
+$("#query").addEventListener("input", resizeQuery);
 document.querySelectorAll<HTMLButtonElement>("[data-query]").forEach(
   (b) =>
     (b.onclick = () => {
       $<HTMLTextAreaElement>("#query").value = b.dataset.query!;
+      resizeQuery();
       $<HTMLTextAreaElement>("#query").focus();
     }),
 );
@@ -504,6 +611,15 @@ $("#composer").addEventListener("submit", async (e) => {
   const input = $<HTMLTextAreaElement>("#query");
   const query = input.value.trim();
   if (!query) return;
+  if (!state.allSources && !state.selected.size) {
+    toast("Select a source in the library, or explicitly choose all sources.");
+    showView("library");
+    return;
+  }
+  if (!state.allSources && [...state.selected].some(id => state.contents.find(c => c.id === id)?.status !== "ready")) {
+    toast("The selected source is not ready. Wait for processing or retry it in the library.");
+    return;
+  }
   const history = state.messages
     .slice(-12)
     .map(({ role, content }) => ({ role, content }));
@@ -516,6 +632,7 @@ $("#composer").addEventListener("submit", async (e) => {
   );
   const answer = state.messages.at(-1)!;
   input.value = "";
+  resizeQuery();
   $("#send").innerHTML = icon("square");
   $("#send").setAttribute("aria-label", "Stop response");
   renderMessages();
@@ -530,6 +647,7 @@ $("#composer").addEventListener("submit", async (e) => {
         incognito: state.incognito,
         history,
         content_ids: [...state.selected],
+        all_sources: state.allSources,
       }),
     });
     const reader = response.body!.getReader();
@@ -615,7 +733,12 @@ $("#upload-form").addEventListener("submit", async (e) => {
   button.textContent = "Uploading…";
   $("#upload-error").textContent = "";
   try {
-    await api("/contents", { method: "POST", body: form });
+    const uploaded = await (await api("/contents", { method: "POST", body: form })).json();
+    state.allSources = false;
+    state.selected = new Set([uploaded.id]);
+    state.scopeInitialized = true;
+    saveScope();
+    newChat();
     $<HTMLDialogElement>("#upload-modal").close();
     $<HTMLFormElement>("#upload-form").reset();
     await loadContents();
@@ -646,9 +769,17 @@ $("#access-form").addEventListener("submit", async (e) => {
 async function initialize() {
   try {
     const health = await (await api("/health")).json();
-    $("#config-note").hidden = health.openai_configured;
-    $("#config-note").textContent =
-      "Add OPENAI_API_KEY to .env and restart the server to start analyzing your sources.";
+    const missing: string[] = [];
+    if (!health.openai_configured) missing.push("Source processing requires OPENAI_API_KEY.");
+    if (health.chat_configured === false) missing.push(
+      health.chat_provider === "gemini"
+        ? "Gemini answers require GEMINI_API_KEY."
+        : "Answer generation requires OPENAI_API_KEY.",
+    );
+    $("#config-note").hidden = missing.length === 0;
+    $("#config-note").textContent = missing.length
+      ? `${missing.join(" ")} Add the key to .env and restart the server.`
+      : "";
     await Promise.all([loadHistory(), loadContents()]);
   } catch (e) {
     $("#config-note").hidden = false;
@@ -667,7 +798,7 @@ function applyTheme(theme: "light" | "dark") {
   $("#theme-toggle").setAttribute("aria-pressed", String(dark));
   document
     .querySelector('meta[name="theme-color"]')
-    ?.setAttribute("content", dark ? "#111922" : "#f5f7fb");
+    ?.setAttribute("content", dark ? "#141a17" : "#fbfcf9");
   refreshIcons();
 }
 function savedTheme() {

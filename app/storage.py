@@ -32,6 +32,7 @@ class Storage:
         await self.run("""CREATE TABLE IF NOT EXISTS chats (
             id TEXT PRIMARY KEY, title TEXT NOT NULL,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)""")
+        await self.run("CREATE TABLE IF NOT EXISTS deleted_contents (id TEXT PRIMARY KEY)")
         await self.run("""CREATE TABLE IF NOT EXISTS messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT NOT NULL,
             role TEXT NOT NULL, content TEXT NOT NULL, sources TEXT NOT NULL DEFAULT '[]')""")
@@ -45,6 +46,37 @@ class Storage:
     async def content(self, content_id):
         rows = await self.run("SELECT * FROM contents WHERE id=?", (content_id,), True)
         return rows[0] if rows else None
+
+    async def mark_deleting(self, content_id):
+        def commit():
+            with sqlite3.connect(self.path, timeout=30) as db:
+                db.execute("INSERT OR IGNORE INTO deleted_contents(id) VALUES (?)", (content_id,))
+                db.execute(
+                    "UPDATE contents SET status='deleting',progress='Deleting source',error=NULL WHERE id=?",
+                    (content_id,),
+                )
+
+        await asyncio.to_thread(commit)
+
+    async def delete_content(self, content_id):
+        """Remove the library entry and stored evidence copies in one transaction."""
+
+        def commit():
+            with sqlite3.connect(self.path, timeout=30) as db:
+                db.execute("BEGIN IMMEDIATE")
+                for message_id, raw in db.execute("SELECT id,sources FROM messages"):
+                    sources = json.loads(raw)
+                    kept = [
+                        s for s in sources if s.get("segment", {}).get("content_id") != content_id
+                    ]
+                    if len(kept) != len(sources):
+                        db.execute(
+                            "UPDATE messages SET sources=?,coverage=NULL WHERE id=?",
+                            (json.dumps(kept, ensure_ascii=False), message_id),
+                        )
+                db.execute("DELETE FROM contents WHERE id=?", (content_id,))
+
+        await asyncio.to_thread(commit)
 
     async def create_chat(self, title):
         chat_id = str(uuid4())
@@ -69,6 +101,9 @@ class Storage:
     async def save_turn(self, chat_id, question, answer, sources, coverage=None):
         def commit():
             with sqlite3.connect(self.path, timeout=30) as db:
+                db.execute("BEGIN IMMEDIATE")
+                deleted = {row[0] for row in db.execute("SELECT id FROM deleted_contents")}
+                kept = [s for s in sources if s.get("segment", {}).get("content_id") not in deleted]
                 db.executemany(
                     "INSERT INTO messages(chat_id,role,content,sources,coverage) VALUES (?,?,?,?,?)",
                     [
@@ -77,8 +112,10 @@ class Storage:
                             chat_id,
                             "assistant",
                             answer,
-                            json.dumps(sources, ensure_ascii=False),
-                            json.dumps(coverage) if coverage else None,
+                            json.dumps(kept, ensure_ascii=False),
+                            json.dumps(coverage)
+                            if coverage and len(kept) == len(sources)
+                            else None,
                         ),
                     ],
                 )
